@@ -15,14 +15,15 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-//ADC
+// ADS1119: I2C address and basic commands
 #define ADS1119_ADDR     (0x40 << 1)  // 7-bit address + R/W bit
 #define ADS1119_REG_CONFIG   0x40
 #define ADS1119_CMD_START    0x08
 #define ADS1119_CMD_READ     0x10
 #define ADS1119_CMD_RESET    0x06
 
-//Testato funziona NON MODIFICARE
+// ADS1119 CONFIG bytes for single-ended channels AINx-AGND
+// Values already tested and validated on this board.
 #define CONFIG_AIN0   0b01101111 // AIN0 - AGND
 #define CONFIG_AIN1   0b10001111 //	AIN1 - AGND
 #define CONFIG_AIN2   0b10101111 //	AIN2 - AGND
@@ -37,8 +38,8 @@
 
 
 
-#define CAN_ID_MAIN_DATA 0x318 // ID messaggio ride height (2byte l'uno): left + rigt + adc1 + adc2
-#define CAN_ID_SP10_DATA 0x31A // ID messaggio pressione SP10 (bar*100 + mV)
+#define CAN_ID_MAIN_DATA 0x318 // 8 bytes: Right(0.1mm), Left(0.1mm), Free ADC(mV), SP10 ADC(mV)
+#define CAN_ID_SP10_DATA 0x31A // 4 bytes: SP10 pressure(bar*100) + SP10 voltage(mV)
 
 
 /* USER CODE END PD */
@@ -56,7 +57,7 @@ TIM_HandleTypeDef htim1;
 
 /* USER CODE BEGIN PV */
 
-// Global variables for timing flags
+// Scheduling flags set in timer ISR (1 ms base tick)
 volatile uint8_t flag_1ms = 0;
 volatile uint8_t flag_10ms = 0;
 volatile uint8_t flag_100ms = 0;
@@ -65,20 +66,20 @@ volatile uint8_t flag_1000ms = 0;
 // Counter variables
 volatile uint16_t ms_counter = 0;
 
-// Globals for debug timing
+// Execution times of periodic tasks (debug/performance)
 volatile uint32_t exec_time_1ms = 0; // should not exceed 50_000
 volatile uint32_t exec_time_10ms = 0; // should not exceed 500_000
 volatile uint32_t exec_time_100ms = 0; // should not exceed 5_000_000
 volatile uint32_t exec_time_1000ms = 0; // should not exceed 50_000_000
 
-// Helper macro to compute time difference with wraparound
+// Difference between two SysTick samples with automatic wraparound handling
 #define SYSTICK_DIFF(start, end) ((start >= end) ? (start - end) : (SysTick->LOAD - end + start))
 
 
 
 
 
-// CAN
+// CAN TX header structures and payload buffers
 CAN_TxHeaderTypeDef can_main_data_TxHeader;
 CAN_TxHeaderTypeDef can_sp10_data_TxHeader;
 uint32_t can_TxMailbox = 0;
@@ -86,21 +87,21 @@ uint8_t can_main_data[8] = {0x00};
 uint8_t can_sp10_data[4] = {0x00};
 
 
-// ADC
+// ADS1119 raw values (ADC counts)
 int16_t pt_analog_in_raw[8] = {0};
 int16_t adc_analog_in_raw[2] = {0};
 int16_t height_right_analog_in_raw = 0;
 int16_t height_left_analog_in_raw = 0;
 int16_t sp10_analog_in_raw = 0;
 
-// Converted millivolt values
+// Values converted to mV
 int32_t pt_analog_in_mv[8] = {0};
 int32_t adc_analog_in_mv[2] = {0};
 int32_t height_right_analog_in_mv = 0;
 int32_t height_left_analog_in_mv = 0;
 int32_t sp10_analog_in_mv = 0;
 
-// Calibrated distance outputs (in mm)
+// Final physical outputs
 float distance_right_mm = 0.0f;
 float distance_left_mm = 0.0f;
 float sp10_pressure_bar = 0.0f;
@@ -109,13 +110,13 @@ float pt_analog_in_temp[8] = {0.0f};
 
 
 
-// CONFIG byte for differential AIN0-AIN1, Gain = 1, 20 SPS, continuous mode
+// Legacy buffer used for ADS1119 CONFIG register write
 uint8_t config_data[2] = {0x01, 0b00000100};  // Register address + config byte
 
 
 
-//LOOKUP TABLES
-// Structure for a lookup table
+// LOOKUP TABLES
+// Generic structure for conversion using linear interpolation between known points
 typedef struct {
     const int32_t *input_values;  // Array of input values (mV)
     const float *output_values;   // Array of output values (mm or °C)
@@ -124,7 +125,8 @@ typedef struct {
 
 
 
-// Table for height sensors LEFT/RIGHT (using BACK calibration)
+// Shared height table for LEFT and RIGHT.
+// Current requirement: both front sensors use BACK calibration.
 // OLD RIGHT TABLE (commented):
 // static const int32_t height_right_input_mv[] = {870, 2051, 3210, 4335};
 // static const float height_right_output_mm[] = {16.0f, 51.0f, 86.0f, 120.0f};
@@ -136,7 +138,7 @@ LookupTable_t height_right_table = {
   .size = 5
 };
 
-// Table for height sensor LEFT
+// LEFT uses the same calibration as RIGHT (BACK curve)
 // OLD LEFT TABLE (commented):
 // static const int32_t height_left_input_mv[] = {866, 2045, 3200, 4328};
 // static const float height_left_output_mm[] = {16.0f, 51.0f, 86.0f, 120.0f};
@@ -148,7 +150,7 @@ LookupTable_t height_left_table = {
 };
 
 
-// Table for temperature sensor
+// PT temperature conversion table: mV -> °C
 static const int32_t temp_input_mv[] = {0, 1000, 2000, 3000};
 static const float temp_output_c[] = {-10.0f, 25.0f, 60.0f, 100.0f};
 LookupTable_t temp_table = {
@@ -560,15 +562,16 @@ int16_t ADS1119_Read(I2C_HandleTypeDef *hi2c) {
 void Analog_Read_ALL(void){
 
 
+  // AIN0: one slot used by SP10 (S0A), one free (S3A), others per wiring map
 	ADS1119_Config(&hi2c1,0);
 	ADS1119_Start(&hi2c1);
 
 	SetMUX(0b00000000);
-  adc_analog_in_raw[0] = 0;                     // ADC libero (S3A primo MUX)
+  adc_analog_in_raw[0] = 0;                     // S3A free: kept at 0 for CAN payload consistency
 
     SetMUX(0b00000101);
   sp10_analog_in_raw = ADS1119_Read(&hi2c1);    // SP10 su S0A primo MUX (AIN0)
-  adc_analog_in_raw[1] = sp10_analog_in_raw;    // ADC usato da SP10
+  adc_analog_in_raw[1] = sp10_analog_in_raw;    // Copy to logical ADC2 for telemetry backward compatibility
 
     SetMUX(0b00001010);
     pt_analog_in_raw[0] = ADS1119_Read(&hi2c1); 	//PT1
@@ -579,6 +582,7 @@ void Analog_Read_ALL(void){
 
 
 	ADS1119_Config(&hi2c1,1);
+  // AIN1: PT2, PT8, PT4, PT6 (PT6 not connected on PCB)
 	ADS1119_Start(&hi2c1);
 
 	SetMUX(0b00000000);
@@ -596,6 +600,7 @@ void Analog_Read_ALL(void){
 
 
 	ADS1119_Config(&hi2c1,2);
+  // AIN2: PT3, PT5, PT7, Height Left
 	ADS1119_Start(&hi2c1);
 
 	SetMUX(0b00000000);
@@ -612,6 +617,7 @@ void Analog_Read_ALL(void){
 
 
 	ADS1119_Config(&hi2c1,3);
+  // AIN3: Height Right on one MUX position, remaining inputs not connected
 	ADS1119_Start(&hi2c1);
 
 	SetMUX(0b00000000);
@@ -629,20 +635,24 @@ void Analog_Read_ALL(void){
 }
 
 void SetMUX(uint8_t mux_value) {
-    // Extract each bit from the mux_value
+  // Mapping bit:
+  // bit0 -> MUX1_A0 (PB5)
+  // bit1 -> MUX1_A1 (PB4)
+  // bit2 -> MUX2_A0 (PB11)
+  // bit3 -> MUX2_A1 (PB10)
     uint8_t mux1_a0 = (mux_value >> 0) & 0x01;
     uint8_t mux1_a1 = (mux_value >> 1) & 0x01;
     uint8_t mux2_a0 = (mux_value >> 2) & 0x01;
     uint8_t mux2_a1 = (mux_value >> 3) & 0x01;
 
-    // Set the GPIOs accordingly
+    // Update selection lines of the two analog MUXes
     HAL_GPIO_WritePin(GPIOB, MUX1_A0_B, mux1_a0 ? GPIO_PIN_SET : GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOB, MUX1_A1_B, mux1_a1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOB, MUX2_A0_B, mux2_a0 ? GPIO_PIN_SET : GPIO_PIN_RESET);
     HAL_GPIO_WritePin(GPIOB, MUX2_A1_B, mux2_a1 ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
-    for(int i = 0; i<10000; i++){ // at least 8000
-    	//empty loop to allow time for MUX to set
+    for(int i = 0; i<10000; i++){ // >=8000 cycles tested as stable
+  	    // Short settling time for the analog path
     	__NOP();
     }
 
@@ -659,7 +669,7 @@ void ConvertAllAdcToMillivolts(void) {
         adc_analog_in_mv[i] = ADS1119_ConvertToMillivolts(adc_analog_in_raw[i]);
     }
 
-    // Convert height sensors
+    // Convert height sensors + SP10 pressure sensor
     height_right_analog_in_mv = ADS1119_ConvertToMillivolts(height_right_analog_in_raw);
     height_left_analog_in_mv = ADS1119_ConvertToMillivolts(height_left_analog_in_raw);
     sp10_analog_in_mv = ADS1119_ConvertToMillivolts(sp10_analog_in_raw);
@@ -668,6 +678,7 @@ void ConvertAllAdcToMillivolts(void) {
 
 int32_t ADS1119_ConvertToMillivolts(int16_t raw_value) {
 
+  // Linear conversion counts->mV with ADS1119 FS set to 5000mV
     return (int32_t)(raw_value * 5000) / 32768;
 
 }
@@ -684,6 +695,8 @@ void ConvertMilliVoltsToTemperature(void){
 }
 
 void ConvertMilliVoltsToPressure(void){
+  // SP10 ratiometric output: 0.5V = 0 bar, 4.5V = 10 bar
+  // Clamp at the limits to avoid out-of-range values.
   if (sp10_analog_in_mv <= 500) {
     sp10_pressure_bar = 0.0f;
   } else if (sp10_analog_in_mv >= 4500) {
@@ -722,7 +735,7 @@ float LookupWithInterpolation(const LookupTable_t *table, int32_t input) {
 
 void SendMainDataToCan(void){
 
-    // Initialize the header fields
+	// Standard CAN header with 8-byte payload
 	can_main_data_TxHeader.StdId = CAN_ID_MAIN_DATA;          // Standard ID
 	can_main_data_TxHeader.ExtId = 0x00;           // Not using extended ID
 	can_main_data_TxHeader.RTR = CAN_RTR_DATA;     // Data frame (not remote)
@@ -730,19 +743,22 @@ void SendMainDataToCan(void){
 	can_main_data_TxHeader.DLC = 8;                // Send 8 bytes
 	can_main_data_TxHeader.TransmitGlobalTime = DISABLE;
 
-	can_main_data[0] = (uint8_t) (((uint16_t) (distance_right_mm * 10)) >> 8); //lohigh
+  // Packing big-endian:
+  // [0..1] Right height (0.1mm)
+  // [2..3] Left height  (0.1mm)
+  // [4..5] Free ADC     (mV)
+  // [6..7] ADC SP10     (mV)
+  can_main_data[0] = (uint8_t) (((uint16_t) (distance_right_mm * 10)) >> 8); // high byte
 	can_main_data[1] = (uint8_t) (distance_right_mm * 10);
 
-	//i primi due byte sono heightSensor2
-	can_main_data[2] = (uint8_t) (((uint16_t) (distance_left_mm * 10)) >> 8); //loHigh
+  can_main_data[2] = (uint8_t) (((uint16_t) (distance_left_mm * 10)) >> 8); // high byte
 	can_main_data[3] = (uint8_t) (distance_left_mm * 10);
 
-	//
-	can_main_data[4] = (uint8_t) (((uint16_t) adc_analog_in_mv[0]) >> 8); //loHigh
+  can_main_data[4] = (uint8_t) (((uint16_t) adc_analog_in_mv[0]) >> 8); // high byte
 	can_main_data[5] = (uint8_t) (adc_analog_in_mv[0]);
 
 
-	can_main_data[6] = (uint8_t) (((uint16_t) adc_analog_in_mv[1]) >> 8); //loHigh
+  can_main_data[6] = (uint8_t) (((uint16_t) adc_analog_in_mv[1]) >> 8); // high byte
 	can_main_data[7] = (uint8_t) adc_analog_in_mv[1];
 
 
@@ -754,6 +770,7 @@ void SendMainDataToCan(void){
 
 void SendSP10DataToCan(void){
 
+  // pressure_cbar = pressure in centibar (bar*100)
   uint16_t pressure_cbar = (uint16_t)(sp10_pressure_bar * 100.0f);
   uint16_t sp10_mv_u16 = (sp10_analog_in_mv > 0) ? (uint16_t)sp10_analog_in_mv : 0;
 
@@ -764,6 +781,7 @@ void SendSP10DataToCan(void){
   can_sp10_data_TxHeader.DLC = 4;
   can_sp10_data_TxHeader.TransmitGlobalTime = DISABLE;
 
+  // Packing big-endian: [0..1]=bar*100, [2..3]=mV
   can_sp10_data[0] = (uint8_t)(pressure_cbar >> 8);
   can_sp10_data[1] = (uint8_t)(pressure_cbar);
   can_sp10_data[2] = (uint8_t)(sp10_mv_u16 >> 8);
