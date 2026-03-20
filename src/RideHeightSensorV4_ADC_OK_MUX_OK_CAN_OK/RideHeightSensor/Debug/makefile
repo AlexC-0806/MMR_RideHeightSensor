@@ -1,6 +1,6 @@
 ################################################################################
 # Automatically-generated file. Do not edit!
-# Toolchain: GNU Tools for STM32 (12.3.rel1)
+# Toolchain: GNU Tools for STM32 (13.3.rel1)
 ################################################################################
 
 -include ../makefile.init
@@ -60,8 +60,8 @@ all: main-build
 main-build: RideHeightSensor.elf secondary-outputs
 
 # Tool invocations
-RideHeightSensor.elf RideHeightSensor.map: $(OBJS) $(USER_OBJS) C:\Users\Lorenzo\Desktop\MMR\MMR_RideHeightSensor\src\RideHeightSensorV4_ADC_OK_MUX_OK_CAN_OK\RideHeightSensor\STM32F103C6TX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
-	arm-none-eabi-gcc -o "RideHeightSensor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"C:\Users\Lorenzo\Desktop\MMR\MMR_RideHeightSensor\src\RideHeightSensorV4_ADC_OK_MUX_OK_CAN_OK\RideHeightSensor\STM32F103C6TX_FLASH.ld" --specs=nosys.specs -Wl,-Map="RideHeightSensor.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+RideHeightSensor.elf RideHeightSensor.map: $(OBJS) $(USER_OBJS) C:\Users\Alex\STMicroelectronics\MMR_RideHeightSensor\src\RideHeightSensorV4_ADC_OK_MUX_OK_CAN_OK\RideHeightSensor\STM32F103C6TX_FLASH.ld makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-gcc -o "RideHeightSensor.elf" @"objects.list" $(USER_OBJS) $(LIBS) -mcpu=cortex-m3 -T"C:\Users\Alex\STMicroelectronics\MMR_RideHeightSensor\src\RideHeightSensorV4_ADC_OK_MUX_OK_CAN_OK\RideHeightSensor\STM32F103C6TX_FLASH.ld" --specs=nosys.specs -Wl,-Map="RideHeightSensor.map" -Wl,--gc-sections -static --specs=nano.specs -mfloat-abi=soft -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
 	@echo 'Finished building target: $@'
 	@echo ' '
 

@@ -38,6 +38,7 @@
 
 
 #define CAN_ID_MAIN_DATA 0x318 // ID messaggio ride height (2byte l'uno): left + rigt + adc1 + adc2
+#define CAN_ID_SP10_DATA 0x31A // ID messaggio pressione SP10 (bar*100 + mV)
 
 
 /* USER CODE END PD */
@@ -79,8 +80,10 @@ volatile uint32_t exec_time_1000ms = 0; // should not exceed 50_000_000
 
 // CAN
 CAN_TxHeaderTypeDef can_main_data_TxHeader;
+CAN_TxHeaderTypeDef can_sp10_data_TxHeader;
 uint32_t can_TxMailbox = 0;
 uint8_t can_main_data[8] = {0x00};
+uint8_t can_sp10_data[4] = {0x00};
 
 
 // ADC
@@ -88,16 +91,19 @@ int16_t pt_analog_in_raw[8] = {0};
 int16_t adc_analog_in_raw[2] = {0};
 int16_t height_right_analog_in_raw = 0;
 int16_t height_left_analog_in_raw = 0;
+int16_t sp10_analog_in_raw = 0;
 
 // Converted millivolt values
 int32_t pt_analog_in_mv[8] = {0};
 int32_t adc_analog_in_mv[2] = {0};
 int32_t height_right_analog_in_mv = 0;
 int32_t height_left_analog_in_mv = 0;
+int32_t sp10_analog_in_mv = 0;
 
 // Calibrated distance outputs (in mm)
 float distance_right_mm = 0.0f;
 float distance_left_mm = 0.0f;
+float sp10_pressure_bar = 0.0f;
 
 float pt_analog_in_temp[8] = {0.0f};
 
@@ -118,26 +124,27 @@ typedef struct {
 
 
 
-// Table for height sensor RIGHT
-// Current Sensor Baseline {870, 2051, 3210, 4335};
-// Voltage Sensor Baseline PROBLEMA voltage creep
-static const int32_t height_right_input_mv[] = {870, 2051, 3210, 4335};
-static const float height_right_output_mm[] = {16.0f, 51.0f, 86.0f, 120.0f};
+// Table for height sensors LEFT/RIGHT (using BACK calibration)
+// OLD RIGHT TABLE (commented):
+// static const int32_t height_right_input_mv[] = {870, 2051, 3210, 4335};
+// static const float height_right_output_mm[] = {16.0f, 51.0f, 86.0f, 120.0f};
+static const int32_t height_back_input_mv[] = {23, 590, 2017, 3185, 4969};
+static const float height_back_output_mm[] = {15.5f, 28.0f, 56.5f, 83.5f, 117.0f};
 LookupTable_t height_right_table = {
-    .input_values = height_right_input_mv,
-    .output_values = height_right_output_mm,
-    .size = 4
+  .input_values = height_back_input_mv,
+  .output_values = height_back_output_mm,
+  .size = 5
 };
 
 // Table for height sensor LEFT
-// Current Sensor Baseline {866, 2045, 3200, 4328};
-// Voltage Sensor Baseline PROBLEMA voltage creep
-static const int32_t height_left_input_mv[] = {866, 2045, 3200, 4328};
-static const float height_left_output_mm[] = {16.0f, 51.0f, 86.0f, 120.0f};
+// OLD LEFT TABLE (commented):
+// static const int32_t height_left_input_mv[] = {866, 2045, 3200, 4328};
+// static const float height_left_output_mm[] = {16.0f, 51.0f, 86.0f, 120.0f};
+// LEFT now uses BACK calibration (same as RIGHT)
 LookupTable_t height_left_table = {
-    .input_values = height_left_input_mv,
-    .output_values = height_left_output_mm,
-    .size = 4
+  .input_values = height_back_input_mv,
+  .output_values = height_back_output_mm,
+  .size = 5
 };
 
 
@@ -149,7 +156,6 @@ LookupTable_t temp_table = {
     .output_values = temp_output_c,
     .size = 4
 };
-
 
 /* USER CODE END PV */
 
@@ -170,6 +176,7 @@ void SetMUX(uint8_t mux_value);
 
 void ConvertMilliVoltsToDistance(void);
 void ConvertMilliVoltsToTemperature(void);
+void ConvertMilliVoltsToPressure(void);
 
 void ConvertAllAdcToMillivolts(void);
 
@@ -185,6 +192,7 @@ static void MX_CAN_Init(void);
 void CAN_Config(void);
 
 void SendMainDataToCan(void);
+void SendSP10DataToCan(void);
 
 /* USER CODE END PFP */
 
@@ -262,7 +270,9 @@ int main(void)
           ConvertAllAdcToMillivolts();
           ConvertMilliVoltsToDistance();
           ConvertMilliVoltsToTemperature();
+          ConvertMilliVoltsToPressure();
           SendMainDataToCan();
+          SendSP10DataToCan();
 
           end = SysTick->VAL;
           exec_time_10ms = SYSTICK_DIFF(start, end);
@@ -554,16 +564,17 @@ void Analog_Read_ALL(void){
 	ADS1119_Start(&hi2c1);
 
 	SetMUX(0b00000000);
-    adc_analog_in_raw[0] = ADS1119_Read(&hi2c1); 	//ADC1
+  adc_analog_in_raw[0] = 0;                     // ADC libero (S3A primo MUX)
 
     SetMUX(0b00000101);
-    // NC
+  sp10_analog_in_raw = ADS1119_Read(&hi2c1);    // SP10 su S0A primo MUX (AIN0)
+  adc_analog_in_raw[1] = sp10_analog_in_raw;    // ADC usato da SP10
 
     SetMUX(0b00001010);
     pt_analog_in_raw[0] = ADS1119_Read(&hi2c1); 	//PT1
 
     SetMUX(0b00001111);
-    adc_analog_in_raw[1] = ADS1119_Read(&hi2c1); 	//ADC2
+    // NC
 
 
 
@@ -651,6 +662,7 @@ void ConvertAllAdcToMillivolts(void) {
     // Convert height sensors
     height_right_analog_in_mv = ADS1119_ConvertToMillivolts(height_right_analog_in_raw);
     height_left_analog_in_mv = ADS1119_ConvertToMillivolts(height_left_analog_in_raw);
+    sp10_analog_in_mv = ADS1119_ConvertToMillivolts(sp10_analog_in_raw);
 }
 
 
@@ -662,13 +674,23 @@ int32_t ADS1119_ConvertToMillivolts(int16_t raw_value) {
 
 void ConvertMilliVoltsToDistance(void) {
     distance_right_mm = LookupWithInterpolation(&height_right_table, height_right_analog_in_mv);
-    distance_left_mm = LookupWithInterpolation(&height_left_table, height_left_analog_in_mv);
+  distance_left_mm = LookupWithInterpolation(&height_left_table, height_left_analog_in_mv);
 }
 
 void ConvertMilliVoltsToTemperature(void){
     for(int i = 0; i < 8; i++) {
         pt_analog_in_temp[i] = LookupWithInterpolation(&temp_table, pt_analog_in_mv[i]);
     }
+}
+
+void ConvertMilliVoltsToPressure(void){
+  if (sp10_analog_in_mv <= 500) {
+    sp10_pressure_bar = 0.0f;
+  } else if (sp10_analog_in_mv >= 4500) {
+    sp10_pressure_bar = 10.0f;
+  } else {
+    sp10_pressure_bar = ((float)(sp10_analog_in_mv - 500) * 10.0f) / 4000.0f;
+  }
 }
 
 
@@ -728,6 +750,29 @@ void SendMainDataToCan(void){
 	{
 	Error_Handler();
 	}
+}
+
+void SendSP10DataToCan(void){
+
+  uint16_t pressure_cbar = (uint16_t)(sp10_pressure_bar * 100.0f);
+  uint16_t sp10_mv_u16 = (sp10_analog_in_mv > 0) ? (uint16_t)sp10_analog_in_mv : 0;
+
+  can_sp10_data_TxHeader.StdId = CAN_ID_SP10_DATA;
+  can_sp10_data_TxHeader.ExtId = 0x00;
+  can_sp10_data_TxHeader.RTR = CAN_RTR_DATA;
+  can_sp10_data_TxHeader.IDE = CAN_ID_STD;
+  can_sp10_data_TxHeader.DLC = 4;
+  can_sp10_data_TxHeader.TransmitGlobalTime = DISABLE;
+
+  can_sp10_data[0] = (uint8_t)(pressure_cbar >> 8);
+  can_sp10_data[1] = (uint8_t)(pressure_cbar);
+  can_sp10_data[2] = (uint8_t)(sp10_mv_u16 >> 8);
+  can_sp10_data[3] = (uint8_t)(sp10_mv_u16);
+
+  if(HAL_CAN_AddTxMessage(&hcan, &can_sp10_data_TxHeader, can_sp10_data, &can_TxMailbox)!= HAL_OK)
+  {
+    Error_Handler();
+  }
 }
 
 
