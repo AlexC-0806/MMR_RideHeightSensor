@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+  /* USER CODE BEGIN Header */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -38,8 +38,7 @@
 
 
 
-#define CAN_ID_MAIN_DATA 0x318 // 8 bytes: Right(0.1mm), Left(0.1mm), Free ADC(mV), SP10 ADC(mV)
-#define CAN_ID_SP10_DATA 0x31A // 4 bytes: SP10 pressure(bar*100) + SP10 voltage(mV)
+#define CAN_ID_MAIN_DATA 0x318 // 8 bytes: Left height, Right height, SP10 Pressure, ADC2 value
 
 
 /* USER CODE END PD */
@@ -81,10 +80,8 @@ volatile uint32_t exec_time_1000ms = 0; // should not exceed 50_000_000
 
 // CAN TX header structures and payload buffers
 CAN_TxHeaderTypeDef can_main_data_TxHeader;
-CAN_TxHeaderTypeDef can_sp10_data_TxHeader;
 uint32_t can_TxMailbox = 0;
 uint8_t can_main_data[8] = {0x00};
-uint8_t can_sp10_data[4] = {0x00};
 
 
 // ADS1119 raw values (ADC counts)
@@ -130,12 +127,12 @@ typedef struct {
 // OLD RIGHT TABLE (commented):
 // static const int32_t height_right_input_mv[] = {870, 2051, 3210, 4335};
 // static const float height_right_output_mm[] = {16.0f, 51.0f, 86.0f, 120.0f};
-static const int32_t height_back_input_mv[] = {23, 590, 2017, 3185, 4969};
-static const float height_back_output_mm[] = {15.5f, 28.0f, 56.5f, 83.5f, 117.0f};
+static const int32_t height_back_input_mv[] = {26, 205, 900, 1225, 1685, 2418,3133,4160,5005};
+static const float height_back_output_mm[] = {15.02f, 20.0f, 30.0f, 40.0f, 50.0f, 65.0f, 80.0f, 100.0f, 117.0f};
 LookupTable_t height_right_table = {
   .input_values = height_back_input_mv,
   .output_values = height_back_output_mm,
-  .size = 5
+  .size = 9
 };
 
 // LEFT uses the same calibration as RIGHT (BACK curve)
@@ -146,7 +143,7 @@ LookupTable_t height_right_table = {
 LookupTable_t height_left_table = {
   .input_values = height_back_input_mv,
   .output_values = height_back_output_mm,
-  .size = 5
+  .size = 9
 };
 
 
@@ -194,7 +191,6 @@ static void MX_CAN_Init(void);
 void CAN_Config(void);
 
 void SendMainDataToCan(void);
-void SendSP10DataToCan(void);
 
 /* USER CODE END PFP */
 
@@ -274,7 +270,6 @@ int main(void)
           ConvertMilliVoltsToTemperature();
           ConvertMilliVoltsToPressure();
           SendMainDataToCan();
-          SendSP10DataToCan();
 
           end = SysTick->VAL;
           exec_time_10ms = SYSTICK_DIFF(start, end);
@@ -567,7 +562,7 @@ void Analog_Read_ALL(void){
 	ADS1119_Start(&hi2c1);
 
 	SetMUX(0b00000000);
-  adc_analog_in_raw[0] = 0;                     // S3A free: kept at 0 for CAN payload consistency
+  adc_analog_in_raw[0] = ADS1119_Read(&hi2c1);                     // S3A free: kept at 0 for CAN payload consistency
 
     SetMUX(0b00000101);
   sp10_analog_in_raw = ADS1119_Read(&hi2c1);    // SP10 su S0A primo MUX (AIN0)
@@ -744,20 +739,25 @@ void SendMainDataToCan(void){
 	can_main_data_TxHeader.TransmitGlobalTime = DISABLE;
 
   // Packing big-endian:
-  // [0..1] Right height (0.1mm)
-  // [2..3] Left height  (0.1mm)
-  // [4..5] Free ADC     (mV)
-  // [6..7] ADC SP10     (mV)
-  can_main_data[0] = (uint8_t) (((uint16_t) (distance_right_mm * 10)) >> 8); // high byte
-	can_main_data[1] = (uint8_t) (distance_right_mm * 10);
+  // [0..1] Left height       (mm * 10)
+  // [2..3] Right height      (mm * 10)
+  // [4..5] SP10 Pressure     (bar * 100)
+  // [6..7] ADC2 value        (mV)
+  
+  // Byte 0-1: Left height (mm * 10)
+  can_main_data[0] = (uint8_t) (((uint16_t) (distance_left_mm * 10)) >> 8); // high byte
+	can_main_data[1] = (uint8_t) (distance_left_mm * 10);
 
-  can_main_data[2] = (uint8_t) (((uint16_t) (distance_left_mm * 10)) >> 8); // high byte
-	can_main_data[3] = (uint8_t) (distance_left_mm * 10);
+  // Byte 2-3: Right height (mm * 10)
+  can_main_data[2] = (uint8_t) (((uint16_t) (distance_right_mm * 10)) >> 8); // high byte
+	can_main_data[3] = (uint8_t) (distance_right_mm * 10);
 
-  can_main_data[4] = (uint8_t) (((uint16_t) adc_analog_in_mv[0]) >> 8); // high byte
-	can_main_data[5] = (uint8_t) (adc_analog_in_mv[0]);
+  // Byte 4-5: SP10 Pressure (bar * 100)
+  uint16_t pressure_cbar = (uint16_t)(sp10_pressure_bar * 100.0f);
+  can_main_data[4] = (uint8_t) (pressure_cbar >> 8); // high byte
+	can_main_data[5] = (uint8_t) pressure_cbar;
 
-
+  // Byte 6-7: ADC2 value (mV)
   can_main_data[6] = (uint8_t) (((uint16_t) adc_analog_in_mv[1]) >> 8); // high byte
 	can_main_data[7] = (uint8_t) adc_analog_in_mv[1];
 
@@ -767,32 +767,6 @@ void SendMainDataToCan(void){
 	Error_Handler();
 	}
 }
-
-void SendSP10DataToCan(void){
-
-  // pressure_cbar = pressure in centibar (bar*100)
-  uint16_t pressure_cbar = (uint16_t)(sp10_pressure_bar * 100.0f);
-  uint16_t sp10_mv_u16 = (sp10_analog_in_mv > 0) ? (uint16_t)sp10_analog_in_mv : 0;
-
-  can_sp10_data_TxHeader.StdId = CAN_ID_SP10_DATA;
-  can_sp10_data_TxHeader.ExtId = 0x00;
-  can_sp10_data_TxHeader.RTR = CAN_RTR_DATA;
-  can_sp10_data_TxHeader.IDE = CAN_ID_STD;
-  can_sp10_data_TxHeader.DLC = 4;
-  can_sp10_data_TxHeader.TransmitGlobalTime = DISABLE;
-
-  // Packing big-endian: [0..1]=bar*100, [2..3]=mV
-  can_sp10_data[0] = (uint8_t)(pressure_cbar >> 8);
-  can_sp10_data[1] = (uint8_t)(pressure_cbar);
-  can_sp10_data[2] = (uint8_t)(sp10_mv_u16 >> 8);
-  can_sp10_data[3] = (uint8_t)(sp10_mv_u16);
-
-  if(HAL_CAN_AddTxMessage(&hcan, &can_sp10_data_TxHeader, can_sp10_data, &can_TxMailbox)!= HAL_OK)
-  {
-    Error_Handler();
-  }
-}
-
 
 // Timer interrupt callback
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
@@ -820,8 +794,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         }
     }
 }
-
-
 
 /* USER CODE END 4 */
 
